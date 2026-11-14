@@ -2,7 +2,7 @@
 
 A custom Missive UI/iFrame integration that adds a **Write with Grok** action in the draft window and conversation menu. Clicking it asks a Grok Bot routine to write a reply draft in that conversation. This page never sends email, and it stores no secrets in the repo.
 
-Current page version: `write-with-grok-version: 2026-11-14c`
+Current page version: `write-with-grok-version: 2026-11-14d`
 
 ## Install in Missive
 
@@ -24,3 +24,17 @@ The webhook host (`api2.cursor.sh`) answers CORS preflight `OPTIONS` with `Acces
 To actually reach the webhook from Missive, a tiny HTTPS relay must add the Authorization header server-side and return CORS headers that allow `https://djhunterh28.github.io`. The source for a Cloudflare Worker is in `relay/worker.js`. Deploying it needs a free Cloudflare account (or another host with serverless functions, such as Netlify). That account is not available from this repo’s existing tools, so the worker is not live yet.
 
 Once a relay is deployed, paste its URL into **CORS relay URL** in the Missive sidebar settings and save. Leave the webhook URL and Authorization header as they are.
+
+
+## CORS relay
+
+The deployed relay is `https://missive-grok-relay.hurricaneproductions.workers.dev`. The integration page prefills this URL. It does not store the webhook key; each request forwards the Authorization header the user saved in Missive.
+
+## Write vs edit
+
+The sidebar has two modes:
+
+- **Write a new reply** — sends `mode: "reply"` plus optional `instructions`.
+- **Edit my current draft** — sends `mode: "edit"`, optional `instructions`, and `draft_id` / `draft_text` / `draft_subject` when the Missive JS API provides them.
+
+Choosing **Write with Grok** from a conversation or draft menu opens this panel and focuses the Instructions box. Click **Write draft** to send, including with instructions left blank.

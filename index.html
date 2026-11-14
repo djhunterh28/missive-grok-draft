@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Write with Grok</title>
-  <!-- write-with-grok-version: 2026-11-14c -->
+  <!-- write-with-grok-version: 2026-11-14d -->
   <link href="https://integrations.missiveapp.com/missive.css" rel="stylesheet">
   <script src="https://integrations.missiveapp.com/missive.js"></script>
   <style>
@@ -20,11 +20,36 @@
       color: var(--missive-text-color-c);
       font-size: calc(var(--missive-font-size) - 1px);
     }
-    label {
-      display: block;
-      margin: 0 0 4px;
-    }
+    label { display: block; margin: 0 0 4px; }
     .field { margin-bottom: 10px; }
+    .modes {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+    .mode {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--missive-light-border-color);
+      border-radius: var(--missive-border-radius);
+      cursor: pointer;
+      color: var(--missive-text-color-a);
+    }
+    .mode:has(input:checked) {
+      border-color: var(--missive-blue-color);
+      box-shadow: 0 0 0 1px var(--missive-blue-color);
+    }
+    .mode input { margin-top: 3px; flex: 0 0 auto; }
+    .mode-copy { display: flex; flex-direction: column; gap: 2px; }
+    .mode-title { font-weight: 600; }
+    .mode-hint {
+      font-size: calc(var(--missive-font-size) - 2px);
+      color: var(--missive-text-color-c);
+    }
     input[type="text"],
     input[type="url"],
     input[type="password"],
@@ -38,9 +63,7 @@
       padding: 8px;
     }
     input:focus,
-    textarea:focus {
-      box-shadow: 0 0 0 1px var(--missive-blue-color);
-    }
+    textarea:focus { box-shadow: 0 0 0 1px var(--missive-blue-color); }
     textarea { min-height: 88px; resize: vertical; }
     .button.primary {
       width: 100%;
@@ -75,7 +98,24 @@
 <body>
   <div id="component">
     <h1>✨ Write with Grok</h1>
-    <p class="lede">Writes a reply draft in this conversation. Nothing is sent until you press Send in Missive.</p>
+    <p class="lede">Writes or edits a reply draft in this conversation. Nothing is sent until you press Send in Missive.</p>
+
+    <div class="modes" role="radiogroup" aria-label="What should Grok do">
+      <label class="mode">
+        <input type="radio" name="mode" id="mode-reply" value="reply" checked>
+        <span class="mode-copy">
+          <span class="mode-title">Write a new reply</span>
+          <span class="mode-hint">Draft a reply from the thread. Instructions are optional.</span>
+        </span>
+      </label>
+      <label class="mode">
+        <input type="radio" name="mode" id="mode-edit" value="edit">
+        <span class="mode-copy">
+          <span class="mode-title">Edit my current draft</span>
+          <span class="mode-hint">Change the open draft, e.g. “make it shorter”.</span>
+        </span>
+      </label>
+    </div>
 
     <div class="field">
       <label class="text-label" for="instructions">Instructions</label>
@@ -101,9 +141,9 @@
       </div>
 
       <div class="field">
-        <label class="text-label" for="relay-url">CORS relay URL (optional)</label>
-        <input id="relay-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://…workers.dev">
-        <p class="hint text-small text-c">Needed because the Grok Bot webhook blocks browser requests. Leave blank until a relay is deployed. Do not re-paste the webhook key here.</p>
+        <label class="text-label" for="relay-url">CORS relay URL</label>
+        <input id="relay-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://missive-grok-relay.hurricaneproductions.workers.dev">
+        <p class="hint text-small text-c">Prefilled with the deployed relay. You can change it if needed. Do not paste the webhook key here.</p>
       </div>
 
       <div class="save-row">
@@ -111,15 +151,17 @@
         <span id="save-status"></span>
       </div>
     </section>
-    <p class="version">write-with-grok-version: 2026-11-14c</p>
+    <p class="version">write-with-grok-version: 2026-11-14d</p>
   </div>
 
   <script>
     (function () {
-      var PAGE_VERSION = '2026-11-14c';
+      var PAGE_VERSION = '2026-11-14d';
       var STORE_KEY = 'grok_draft_settings';
+      var DEFAULT_RELAY_URL = 'https://missive-grok-relay.hurricaneproductions.workers.dev';
       var currentConversationId = null;
-      var settings = { webhookUrl: '', authorization: '', relayUrl: '' };
+      var currentDraft = { id: '', text: '', subject: '' };
+      var settings = { webhookUrl: '', authorization: '', relayUrl: DEFAULT_RELAY_URL };
       var settingsReady = null;
 
       var $instructions = document.getElementById('instructions');
@@ -130,6 +172,8 @@
       var $relayUrl = document.getElementById('relay-url');
       var $saveBtn = document.getElementById('save-btn');
       var $saveStatus = document.getElementById('save-status');
+      var $modeReply = document.getElementById('mode-reply');
+      var $modeEdit = document.getElementById('mode-edit');
 
       function setStatus(message, kind) {
         $status.textContent = message || '';
@@ -153,6 +197,22 @@
         missiveAlert(message, note || '');
       }
 
+      function selectedMode() {
+        return ($modeEdit && $modeEdit.checked) ? 'edit' : 'reply';
+      }
+
+      function setMode(mode) {
+        if (mode === 'edit') $modeEdit.checked = true;
+        else $modeReply.checked = true;
+        updateInstructionPlaceholder();
+      }
+
+      function updateInstructionPlaceholder() {
+        $instructions.placeholder = selectedMode() === 'edit'
+          ? 'Optional — e.g. make it shorter'
+          : 'Optional — e.g. say yes but push to Tuesday';
+      }
+
       function normalizeAuthHeader(value) {
         var v = String(value || '').trim().replace(/^authorization\s*:\s*/i, '').trim();
         if (v && !/^(bearer|basic)\s+/i.test(v) && v.indexOf(' ') === -1) {
@@ -161,27 +221,100 @@
         return v;
       }
 
+      function stringField(obj, keys) {
+        if (!obj || typeof obj !== 'object') return '';
+        for (var i = 0; i < keys.length; i++) {
+          var val = obj[keys[i]];
+          if (typeof val === 'string' && val.trim()) return val;
+        }
+        return '';
+      }
+
+      function draftFromObject(obj) {
+        if (!obj) return { id: '', text: '', subject: '' };
+        if (typeof obj === 'string') return { id: obj, text: '', subject: '' };
+        return {
+          id: stringField(obj, ['id', 'draft_id', 'draftId', 'message_id', 'messageId']),
+          text: stringField(obj, ['body', 'text', 'html', 'content', 'preview']),
+          subject: stringField(obj, ['subject'])
+        };
+      }
+
+      function mergeDraft(into, from) {
+        return {
+          id: from.id || into.id || '',
+          text: from.text || into.text || '',
+          subject: from.subject || into.subject || ''
+        };
+      }
+
+      function extractDraftFromContext(ctx) {
+        var found = { id: '', text: '', subject: '' };
+        if (!ctx || typeof ctx === 'string') return found;
+        if (ctx.draft) found = mergeDraft(found, draftFromObject(ctx.draft));
+        if (ctx.message && (ctx.message.draft || ctx.message.type === 'draft' || !ctx.message.delivered_at)) {
+          found = mergeDraft(found, draftFromObject(ctx.message));
+        }
+        var conv = ctx.conversation;
+        if (conv && typeof conv === 'object') {
+          if (conv.draft) found = mergeDraft(found, draftFromObject(conv.draft));
+          if (Array.isArray(conv.drafts) && conv.drafts.length) {
+            found = mergeDraft(found, draftFromObject(conv.drafts[0]));
+          }
+        }
+        return found;
+      }
+
       function conversationIdFromContext(ctx) {
         if (!ctx) return currentConversationId;
         if (typeof ctx === 'string') return ctx;
         var conv = ctx.conversation || ctx.draft || null;
         if (typeof conv === 'string') return conv;
-        if (conv && (conv.id || conv.conversation_id)) return conv.id || conv.conversation_id;
+        if (conv && (conv.id || conv.conversation_id)) {
+          if (ctx.draft && conv === ctx.draft && (conv.conversation_id || conv.conversationId)) {
+            return conv.conversation_id || conv.conversationId;
+          }
+          if (ctx.conversation && conv === ctx.conversation) return conv.id || conv.conversation_id;
+        }
+        if (ctx.draft && typeof ctx.draft === 'object') {
+          var fromDraft = ctx.draft.conversation_id || ctx.draft.conversationId;
+          if (fromDraft) return fromDraft;
+        }
         if (Array.isArray(ctx.conversations) && ctx.conversations.length) {
           var first = ctx.conversations[0];
           if (typeof first === 'string') return first;
           if (first && (first.id || first.conversation_id)) return first.id || first.conversation_id;
         }
         if (ctx.conversation_id) return ctx.conversation_id;
+        if (conv && (conv.id || conv.conversation_id)) return conv.id || conv.conversation_id;
         if (ctx.id && !ctx.message && !ctx.tel && !ctx.comment) return ctx.id;
         return currentConversationId;
+      }
+
+      function focusInstructions() {
+        try {
+          $instructions.focus();
+          if (typeof $instructions.select === 'function' && !$instructions.value) {
+            $instructions.setSelectionRange(0, 0);
+          }
+        } catch (e) {}
+      }
+
+      function openPanelForInstructions(statusMessage) {
+        if (window.Missive && typeof Missive.openSelf === 'function') {
+          Missive.openSelf();
+        }
+        setStatus(statusMessage || 'Add optional instructions, then click Write draft.', 'info');
+        focusInstructions();
+        setTimeout(focusInstructions, 150);
+        setTimeout(focusInstructions, 400);
       }
 
       function readFormSettings() {
         return {
           webhookUrl: ($webhookUrl.value || '').trim(),
           authorization: normalizeAuthHeader($authHeader.value),
-          relayUrl: ($relayUrl.value || '').trim()
+          relayUrl: ($relayUrl.value || '').trim() || DEFAULT_RELAY_URL
         };
       }
 
@@ -191,19 +324,21 @@
           if (stored && typeof stored === 'object') {
             settings.webhookUrl = stored.webhookUrl || stored.webhook_url || '';
             settings.authorization = normalizeAuthHeader(stored.authorization || stored.authorizationHeader || stored.authHeader || '');
-            settings.relayUrl = stored.relayUrl || stored.relay_url || '';
+            settings.relayUrl = stored.relayUrl || stored.relay_url || DEFAULT_RELAY_URL;
           }
         } catch (err) {
           console.warn('Write with Grok: could not load settings', err);
         }
+        if (!settings.relayUrl) settings.relayUrl = DEFAULT_RELAY_URL;
         $webhookUrl.value = settings.webhookUrl || '';
         $authHeader.value = settings.authorization || '';
-        $relayUrl.value = settings.relayUrl || '';
+        $relayUrl.value = settings.relayUrl || DEFAULT_RELAY_URL;
       }
 
       async function saveSettings() {
         settings = readFormSettings();
         $authHeader.value = settings.authorization;
+        $relayUrl.value = settings.relayUrl;
         try {
           await Missive.storeSet(STORE_KEY, {
             webhookUrl: settings.webhookUrl,
@@ -239,8 +374,9 @@
           'Authorization': authorization
         };
         var url = webhookUrl;
-        if (relayUrl) {
-          url = relayUrl;
+        var relay = relayUrl || DEFAULT_RELAY_URL;
+        if (relay) {
+          url = relay;
           headers['X-Webhook-Url'] = webhookUrl;
         }
 
@@ -254,7 +390,7 @@
         } catch (err) {
           if (isCorsOrNetworkError(err)) {
             var corsErr = new Error(
-              relayUrl
+              relay
                 ? 'blocked by browser (CORS) talking to the relay'
                 : 'blocked by browser (CORS)'
             );
@@ -282,7 +418,7 @@
         settings = {
           webhookUrl: form.webhookUrl || settings.webhookUrl,
           authorization: form.authorization || settings.authorization,
-          relayUrl: form.relayUrl || settings.relayUrl
+          relayUrl: form.relayUrl || settings.relayUrl || DEFAULT_RELAY_URL
         };
 
         if (!settings.webhookUrl) {
@@ -294,35 +430,47 @@
           return;
         }
 
+        var fromCtx = extractDraftFromContext(ctx);
+        currentDraft = mergeDraft(currentDraft, fromCtx);
+
         var conversationId = conversationIdFromContext(ctx);
         if (!conversationId) {
           alertError('No conversation is selected. Open a thread, then try again.');
           return;
         }
 
+        var mode = selectedMode();
         var instructions = ($instructions.value || '').trim();
         var payload = {
           conversation_id: conversationId,
           instructions: instructions,
-          mode: 'reply',
+          mode: mode,
           source: 'missive-integration',
           requested_at: new Date().toISOString(),
           integration_version: PAGE_VERSION
         };
+        if (mode === 'edit') {
+          payload.draft_id = currentDraft.id || '';
+          payload.draft_text = currentDraft.text || '';
+          payload.draft_subject = currentDraft.subject || '';
+        }
 
         $writeBtn.disabled = true;
         setStatus('Sending to Grok…', 'info');
 
         try {
           await postWebhook(settings.webhookUrl, settings.authorization, settings.relayUrl, payload);
-          alertOk('Sent to Grok — draft appears in ~1 min', 'Nothing has been sent to the recipient.');
+          var ok = mode === 'edit'
+            ? 'Sent to Grok — the updated draft appears in ~1 min'
+            : 'Sent to Grok — draft appears in ~1 min';
+          alertOk(ok, 'Nothing has been sent to the recipient.');
         } catch (err) {
           var message = String(err && err.message ? err.message : err);
           if (err && err.cors && !settings.relayUrl) {
             message = 'blocked by browser (CORS)';
             alertError(
               message,
-              'The Grok Bot webhook does not allow browser requests, so this click never reached the routine. A small CORS relay is required. You do not need to re-paste the webhook key. Ask Grok Bot to help deploy the relay in the missive-grok-draft repo.'
+              'The Grok Bot webhook does not allow browser requests, so this click never reached the routine. A CORS relay is required.'
             );
           } else {
             alertError('Could not reach the Grok Bot webhook. ' + message, message);
@@ -330,6 +478,21 @@
         } finally {
           $writeBtn.disabled = false;
         }
+      }
+
+      function onMenuAction(ctx) {
+        var fromCtx = extractDraftFromContext(ctx);
+        currentDraft = mergeDraft(currentDraft, fromCtx);
+        var conversationId = conversationIdFromContext(ctx);
+        if (conversationId) currentConversationId = conversationId;
+
+        var openedFromDraft = !!(ctx && ctx.draft) || !!(fromCtx && (fromCtx.id || fromCtx.text));
+        setMode(openedFromDraft ? 'edit' : 'reply');
+
+        var hint = openedFromDraft
+          ? 'Edit mode is selected. Optional: say what to change, then click Write draft.'
+          : 'Write a new reply is selected. Optional: add instructions, then click Write draft.';
+        openPanelForInstructions(hint);
       }
 
       function init() {
@@ -343,7 +506,7 @@
             emoji: ':sparkles:',
             contexts: ['draft', 'conversation'],
             callback: function (ctx) {
-              return writeDraft(ctx);
+              onMenuAction(ctx);
             }
           }
         ]);
@@ -353,6 +516,9 @@
         $webhookUrl.addEventListener('change', saveSettings);
         $authHeader.addEventListener('change', saveSettings);
         $relayUrl.addEventListener('change', saveSettings);
+        $modeReply.addEventListener('change', updateInstructionPlaceholder);
+        $modeEdit.addEventListener('change', updateInstructionPlaceholder);
+        updateInstructionPlaceholder();
 
         settingsReady = loadSettings();
       }
