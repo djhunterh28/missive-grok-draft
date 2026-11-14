@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Write with Grok</title>
+  <link href="https://integrations.missiveapp.com/missive.css" rel="stylesheet">
+  <script src="https://integrations.missiveapp.com/missive.js"></script>
+  <style>
+    #component { padding: 12px 14px 20px; }
+    h1 {
+      margin: 0 0 4px;
+      font-size: calc(var(--missive-font-size) + 3px);
+      font-weight: 600;
+      color: var(--missive-text-color-a);
+    }
+    .lede {
+      margin: 0 0 14px;
+      color: var(--missive-text-color-c);
+      font-size: calc(var(--missive-font-size) - 1px);
+    }
+    label {
+      display: block;
+      margin: 0 0 4px;
+    }
+    .field { margin-bottom: 10px; }
+    input[type="text"],
+    input[type="url"],
+    input[type="password"],
+    textarea {
+      border-radius: var(--missive-border-radius);
+      width: 100%;
+      color: var(--missive-text-color-a);
+      border: 1px solid var(--missive-light-border-color);
+      background-color: var(--missive-light-active-color);
+      outline: none;
+      padding: 8px;
+    }
+    input:focus,
+    textarea:focus {
+      box-shadow: 0 0 0 1px var(--missive-blue-color);
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    .button.primary {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: calc(var(--missive-font-size) + 1px);
+    }
+    #status {
+      margin: 10px 0 0;
+      min-height: 1.4em;
+      font-size: calc(var(--missive-font-size) - 1px);
+    }
+    #status[data-kind="ok"] { color: var(--missive-green-color, #1a9d55); }
+    #status[data-kind="error"] { color: var(--missive-red-color, #d64545); }
+    #status[data-kind="info"] { color: var(--missive-text-color-c); }
+    .hint { margin: 4px 0 0; }
+    .settings { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--missive-light-border-color); }
+    .settings h2 {
+      margin: 0 0 8px;
+      font-size: var(--missive-font-size);
+      font-weight: 600;
+    }
+    .save-row { display: flex; align-items: center; gap: 8px; }
+    .save-row .button { flex: 0 0 auto; }
+    #save-status { font-size: calc(var(--missive-font-size) - 2px); color: var(--missive-text-color-c); }
+  </style>
+</head>
+<body>
+  <div id="component">
+    <h1>✨ Write with Grok</h1>
+    <p class="lede">Writes a reply draft in this conversation. Nothing is sent until you press Send in Missive.</p>
+
+    <div class="field">
+      <label class="text-label" for="instructions">Instructions</label>
+      <textarea id="instructions" placeholder="Optional — e.g. say yes but push to Tuesday"></textarea>
+    </div>
+
+    <button id="write-btn" class="button primary" type="button">Write draft</button>
+    <p id="status" class="text-small" role="status" aria-live="polite"></p>
+
+    <section class="settings" aria-labelledby="settings-heading">
+      <h2 id="settings-heading">Settings</h2>
+      <p class="hint text-small text-c">Copy the Webhook URL and Authorization header from this routine’s panel in Grok Bot. Values are saved in Missive, not in this page.</p>
+
+      <div class="field">
+        <label class="text-label" for="webhook-url">Webhook URL</label>
+        <input id="webhook-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://…">
+      </div>
+
+      <div class="field">
+        <label class="text-label" for="auth-header">Authorization header</label>
+        <input id="auth-header" type="password" autocomplete="off" spellcheck="false" placeholder="Bearer …">
+        <p class="hint text-small text-c">Paste the full Authorization header value, not just the webhook key.</p>
+      </div>
+
+      <div class="save-row">
+        <button id="save-btn" class="button button-secondary" type="button">Save settings</button>
+        <span id="save-status"></span>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    (function () {
+      var STORE_KEY = 'grok_draft_settings';
+      var currentConversationId = null;
+      var settings = { webhookUrl: '', authorization: '' };
+
+      var $instructions = document.getElementById('instructions');
+      var $writeBtn = document.getElementById('write-btn');
+      var $status = document.getElementById('status');
+      var $webhookUrl = document.getElementById('webhook-url');
+      var $authHeader = document.getElementById('auth-header');
+      var $saveBtn = document.getElementById('save-btn');
+      var $saveStatus = document.getElementById('save-status');
+
+      function setStatus(message, kind) {
+        $status.textContent = message || '';
+        if (kind) $status.setAttribute('data-kind', kind);
+        else $status.removeAttribute('data-kind');
+      }
+
+      function alertError(message, note) {
+        setStatus(message, 'error');
+        if (window.Missive && typeof Missive.alert === 'function') {
+          Missive.alert({ title: 'Write with Grok', message: message, note: note || '' });
+        }
+      }
+
+      function normalizeAuthHeader(value) {
+        var v = String(value || '').trim().replace(/^authorization\s*:\s*/i, '').trim();
+        if (v && !/^(bearer|basic)\s+/i.test(v) && v.indexOf(' ') === -1) {
+          v = 'Bearer ' + v;
+        }
+        return v;
+      }
+
+      function conversationIdFromContext(ctx) {
+        if (!ctx) return currentConversationId;
+        if (typeof ctx === 'string') return ctx;
+        var conv = ctx.conversation || ctx.draft || null;
+        if (typeof conv === 'string') return conv;
+        if (conv && (conv.id || conv.conversation_id)) return conv.id || conv.conversation_id;
+        if (Array.isArray(ctx.conversations) && ctx.conversations.length) {
+          var first = ctx.conversations[0];
+          if (typeof first === 'string') return first;
+          if (first && (first.id || first.conversation_id)) return first.id || first.conversation_id;
+        }
+        if (ctx.conversation_id) return ctx.conversation_id;
+        if (ctx.id && !ctx.message && !ctx.tel && !ctx.comment) return ctx.id;
+        return currentConversationId;
+      }
+
+      function readFormSettings() {
+        return {
+          webhookUrl: ($webhookUrl.value || '').trim(),
+          authorization: normalizeAuthHeader($authHeader.value)
+        };
+      }
+
+      async function loadSettings() {
+        try {
+          var stored = await Missive.storeGet(STORE_KEY);
+          if (stored && typeof stored === 'object') {
+            settings.webhookUrl = stored.webhookUrl || stored.webhook_url || '';
+            settings.authorization = normalizeAuthHeader(stored.authorization || stored.authorizationHeader || stored.authHeader || '');
+          }
+        } catch (err) {
+          console.warn('Write with Grok: could not load settings', err);
+        }
+        $webhookUrl.value = settings.webhookUrl || '';
+        $authHeader.value = settings.authorization || '';
+      }
+
+      async function saveSettings() {
+        settings = readFormSettings();
+        $authHeader.value = settings.authorization;
+        try {
+          await Missive.storeSet(STORE_KEY, {
+            webhookUrl: settings.webhookUrl,
+            authorization: settings.authorization
+          });
+          $saveStatus.textContent = 'Saved';
+          setTimeout(function () { $saveStatus.textContent = ''; }, 2000);
+        } catch (err) {
+          $saveStatus.textContent = 'Could not save';
+          alertError('Could not save settings in Missive.', String(err && err.message ? err.message : err));
+        }
+      }
+
+      function isCorsOrNetworkError(err) {
+        if (!err) return false;
+        if (err.name === 'TypeError') return true;
+        return /failed to fetch|networkerror|cors/i.test(String(err && err.message ? err.message : err));
+      }
+
+      async function postWebhook(url, authorization, payload) {
+        var body = JSON.stringify(payload);
+        try {
+          var res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': authorization
+            },
+            body: body
+          });
+          if (!res.ok) {
+            var text = '';
+            try { text = await res.text(); } catch (e) {}
+            var err = new Error('Webhook returned ' + res.status + (text ? ': ' + String(text).slice(0, 200) : ''));
+            err.status = res.status;
+            throw err;
+          }
+          return 'ok';
+        } catch (err) {
+          if (!isCorsOrNetworkError(err)) throw err;
+          await fetch(url, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'text/plain' },
+            body: body
+          });
+          return 'opaque';
+        }
+      }
+
+      async function writeDraft(ctx) {
+        settings = Object.assign({}, settings, readFormSettings());
+        if (!settings.webhookUrl) {
+          alertError('Add the Webhook URL in Settings, then try again.');
+          return;
+        }
+        if (!settings.authorization) {
+          alertError('Add the Authorization header from the Grok Bot routine panel, then try again.');
+          return;
+        }
+
+        var conversationId = conversationIdFromContext(ctx);
+        if (!conversationId) {
+          alertError('No conversation is selected. Open a thread, then try again.');
+          return;
+        }
+
+        var instructions = ($instructions.value || '').trim();
+        var payload = {
+          conversation_id: conversationId,
+          instructions: instructions,
+          mode: 'reply',
+          source: 'missive-integration',
+          requested_at: new Date().toISOString()
+        };
+
+        $writeBtn.disabled = true;
+        setStatus('Sending to Grok…', 'info');
+
+        try {
+          await postWebhook(settings.webhookUrl, settings.authorization, payload);
+          setStatus('Sent to Grok — draft appears in ~1 min', 'ok');
+        } catch (err) {
+          alertError(
+            'Could not reach the Grok Bot webhook.',
+            String(err && err.message ? err.message : err)
+          );
+        } finally {
+          $writeBtn.disabled = false;
+        }
+      }
+
+      function init() {
+        Missive.on('change:conversations', function (ids) {
+          currentConversationId = (ids && ids.length) ? ids[0] : null;
+        }, { retroactive: true });
+
+        Missive.setActions([
+          {
+            label: 'Write with Grok',
+            emoji: ':sparkles:',
+            contexts: ['draft', 'conversation'],
+            callback: function (ctx) {
+              return writeDraft(ctx);
+            }
+          }
+        ]);
+
+        $writeBtn.addEventListener('click', function () { writeDraft(null); });
+        $saveBtn.addEventListener('click', function () { saveSettings(); });
+        $webhookUrl.addEventListener('change', saveSettings);
+        $authHeader.addEventListener('change', saveSettings);
+
+        loadSettings();
+      }
+
+      if (window.Missive) init();
+      else window.addEventListener('load', init);
+    })();
+  </script>
+</body>
+</html>
