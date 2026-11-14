@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Write with Grok</title>
+  <!-- write-with-grok-version: 2026-11-14c -->
   <link href="https://integrations.missiveapp.com/missive.css" rel="stylesheet">
   <script src="https://integrations.missiveapp.com/missive.js"></script>
   <style>
@@ -64,6 +65,11 @@
     .save-row { display: flex; align-items: center; gap: 8px; }
     .save-row .button { flex: 0 0 auto; }
     #save-status { font-size: calc(var(--missive-font-size) - 2px); color: var(--missive-text-color-c); }
+    .version {
+      margin: 16px 0 0;
+      font-size: 11px;
+      color: var(--missive-text-color-c);
+    }
   </style>
 </head>
 <body>
@@ -94,24 +100,34 @@
         <p class="hint text-small text-c">Paste the full Authorization header value, not just the webhook key.</p>
       </div>
 
+      <div class="field">
+        <label class="text-label" for="relay-url">CORS relay URL (optional)</label>
+        <input id="relay-url" type="url" autocomplete="off" spellcheck="false" placeholder="https://…workers.dev">
+        <p class="hint text-small text-c">Needed because the Grok Bot webhook blocks browser requests. Leave blank until a relay is deployed. Do not re-paste the webhook key here.</p>
+      </div>
+
       <div class="save-row">
         <button id="save-btn" class="button button-secondary" type="button">Save settings</button>
         <span id="save-status"></span>
       </div>
     </section>
+    <p class="version">write-with-grok-version: 2026-11-14c</p>
   </div>
 
   <script>
     (function () {
+      var PAGE_VERSION = '2026-11-14c';
       var STORE_KEY = 'grok_draft_settings';
       var currentConversationId = null;
-      var settings = { webhookUrl: '', authorization: '' };
+      var settings = { webhookUrl: '', authorization: '', relayUrl: '' };
+      var settingsReady = null;
 
       var $instructions = document.getElementById('instructions');
       var $writeBtn = document.getElementById('write-btn');
       var $status = document.getElementById('status');
       var $webhookUrl = document.getElementById('webhook-url');
       var $authHeader = document.getElementById('auth-header');
+      var $relayUrl = document.getElementById('relay-url');
       var $saveBtn = document.getElementById('save-btn');
       var $saveStatus = document.getElementById('save-status');
 
@@ -121,11 +137,20 @@
         else $status.removeAttribute('data-kind');
       }
 
-      function alertError(message, note) {
-        setStatus(message, 'error');
+      function missiveAlert(message, note) {
         if (window.Missive && typeof Missive.alert === 'function') {
           Missive.alert({ title: 'Write with Grok', message: message, note: note || '' });
         }
+      }
+
+      function alertError(message, note) {
+        setStatus(message, 'error');
+        missiveAlert(message, note || '');
+      }
+
+      function alertOk(message, note) {
+        setStatus(message, 'ok');
+        missiveAlert(message, note || '');
       }
 
       function normalizeAuthHeader(value) {
@@ -155,7 +180,8 @@
       function readFormSettings() {
         return {
           webhookUrl: ($webhookUrl.value || '').trim(),
-          authorization: normalizeAuthHeader($authHeader.value)
+          authorization: normalizeAuthHeader($authHeader.value),
+          relayUrl: ($relayUrl.value || '').trim()
         };
       }
 
@@ -165,12 +191,14 @@
           if (stored && typeof stored === 'object') {
             settings.webhookUrl = stored.webhookUrl || stored.webhook_url || '';
             settings.authorization = normalizeAuthHeader(stored.authorization || stored.authorizationHeader || stored.authHeader || '');
+            settings.relayUrl = stored.relayUrl || stored.relay_url || '';
           }
         } catch (err) {
           console.warn('Write with Grok: could not load settings', err);
         }
         $webhookUrl.value = settings.webhookUrl || '';
         $authHeader.value = settings.authorization || '';
+        $relayUrl.value = settings.relayUrl || '';
       }
 
       async function saveSettings() {
@@ -179,7 +207,8 @@
         try {
           await Missive.storeSet(STORE_KEY, {
             webhookUrl: settings.webhookUrl,
-            authorization: settings.authorization
+            authorization: settings.authorization,
+            relayUrl: settings.relayUrl
           });
           $saveStatus.textContent = 'Saved';
           setTimeout(function () { $saveStatus.textContent = ''; }, 2000);
@@ -192,42 +221,70 @@
       function isCorsOrNetworkError(err) {
         if (!err) return false;
         if (err.name === 'TypeError') return true;
-        return /failed to fetch|networkerror|cors/i.test(String(err && err.message ? err.message : err));
+        return /failed to fetch|networkerror|load failed|cors/i.test(String(err && err.message ? err.message : err));
       }
 
-      async function postWebhook(url, authorization, payload) {
-        var body = JSON.stringify(payload);
-        try {
-          var res = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': authorization
-            },
-            body: body
-          });
-          if (!res.ok) {
-            var text = '';
-            try { text = await res.text(); } catch (e) {}
-            var err = new Error('Webhook returned ' + res.status + (text ? ': ' + String(text).slice(0, 200) : ''));
-            err.status = res.status;
-            throw err;
-          }
-          return 'ok';
-        } catch (err) {
-          if (!isCorsOrNetworkError(err)) throw err;
-          await fetch(url, {
-            method: 'POST',
-            mode: 'no-cors',
-            headers: { 'Content-Type': 'text/plain' },
-            body: body
-          });
-          return 'opaque';
+      function describeHttpError(res, text) {
+        var snippet = text ? String(text).replace(/\s+/g, ' ').slice(0, 200) : '';
+        if (res.status === 401 || res.status === 403) {
+          return 'Webhook returned HTTP ' + res.status + ' (unauthorized — check the Authorization header).';
         }
+        return 'Webhook returned HTTP ' + res.status + (snippet ? ': ' + snippet : '');
+      }
+
+      async function postWebhook(webhookUrl, authorization, relayUrl, payload) {
+        var body = JSON.stringify(payload);
+        var headers = {
+          'Content-Type': 'application/json',
+          'Authorization': authorization
+        };
+        var url = webhookUrl;
+        if (relayUrl) {
+          url = relayUrl;
+          headers['X-Webhook-Url'] = webhookUrl;
+        }
+
+        var res;
+        try {
+          res = await fetch(url, {
+            method: 'POST',
+            headers: headers,
+            body: body
+          });
+        } catch (err) {
+          if (isCorsOrNetworkError(err)) {
+            var corsErr = new Error(
+              relayUrl
+                ? 'blocked by browser (CORS) talking to the relay'
+                : 'blocked by browser (CORS)'
+            );
+            corsErr.cors = true;
+            throw corsErr;
+          }
+          throw err;
+        }
+
+        if (!res.ok) {
+          var text = '';
+          try { text = await res.text(); } catch (e) {}
+          var err = new Error(describeHttpError(res, text));
+          err.status = res.status;
+          throw err;
+        }
+        return 'ok';
       }
 
       async function writeDraft(ctx) {
-        settings = Object.assign({}, settings, readFormSettings());
+        if (settingsReady) {
+          try { await settingsReady; } catch (e) {}
+        }
+        var form = readFormSettings();
+        settings = {
+          webhookUrl: form.webhookUrl || settings.webhookUrl,
+          authorization: form.authorization || settings.authorization,
+          relayUrl: form.relayUrl || settings.relayUrl
+        };
+
         if (!settings.webhookUrl) {
           alertError('Add the Webhook URL in Settings, then try again.');
           return;
@@ -249,20 +306,27 @@
           instructions: instructions,
           mode: 'reply',
           source: 'missive-integration',
-          requested_at: new Date().toISOString()
+          requested_at: new Date().toISOString(),
+          integration_version: PAGE_VERSION
         };
 
         $writeBtn.disabled = true;
         setStatus('Sending to Grok…', 'info');
 
         try {
-          await postWebhook(settings.webhookUrl, settings.authorization, payload);
-          setStatus('Sent to Grok — draft appears in ~1 min', 'ok');
+          await postWebhook(settings.webhookUrl, settings.authorization, settings.relayUrl, payload);
+          alertOk('Sent to Grok — draft appears in ~1 min', 'Nothing has been sent to the recipient.');
         } catch (err) {
-          alertError(
-            'Could not reach the Grok Bot webhook.',
-            String(err && err.message ? err.message : err)
-          );
+          var message = String(err && err.message ? err.message : err);
+          if (err && err.cors && !settings.relayUrl) {
+            message = 'blocked by browser (CORS)';
+            alertError(
+              message,
+              'The Grok Bot webhook does not allow browser requests, so this click never reached the routine. A small CORS relay is required. You do not need to re-paste the webhook key. Ask Grok Bot to help deploy the relay in the missive-grok-draft repo.'
+            );
+          } else {
+            alertError('Could not reach the Grok Bot webhook. ' + message, message);
+          }
         } finally {
           $writeBtn.disabled = false;
         }
@@ -288,8 +352,9 @@
         $saveBtn.addEventListener('click', function () { saveSettings(); });
         $webhookUrl.addEventListener('change', saveSettings);
         $authHeader.addEventListener('change', saveSettings);
+        $relayUrl.addEventListener('change', saveSettings);
 
-        loadSettings();
+        settingsReady = loadSettings();
       }
 
       if (window.Missive) init();
